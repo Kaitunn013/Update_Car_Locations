@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node --env-file-if-exists=.env AddCarLocations.js"
+    "start": "node --env-file-if-exists=.env.local AddCarLocations.js"
   },
   "dependencies": {
     "mqtt": "^5.15.2"
