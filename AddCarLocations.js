@@ -1,6 +1,4 @@
 import mqtt from "mqtt";
-import { createInterface } from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
 
 const mqttUrl =
   process.env.MQTT_URL ??
@@ -15,48 +13,39 @@ if (!username || !password) {
   process.exit(1);
 }
 
-// ค่าเริ่มต้นสามารถกำหนดไว้ใน .env.local ด้วย CAR_LATITUDE และ CAR_LONGITUDE
-const defaultLat = Number(process.env.CAR_LATITUDE || 14.02432);
-const defaultLng = Number(process.env.CAR_LONGITUDE || 99.9744);
-
 const isValidCoordinate = (value, min, max) =>
   Number.isFinite(value) && value >= min && value <= max;
 
-const askCoordinate = async (readline, label, defaultValue, min, max) => {
-  const defaultText = Number.isFinite(defaultValue) ? ` [${defaultValue}]` : "";
+// แก้พิกัดทั้ง 10 จุดได้ที่ array นี้ โดยเรียงลำดับจุดที่ต้องการให้รถเดินทาง
+const locations = [
+  { lat: 14.022240, lng: 99.984787 },
+  { lat: 14.022115, lng: 99.977652 },
+  { lat: 14.023593, lng: 99.976011},
+  { lat: 14.021334, lng: 99.976011 },
+  { lat: 14.021014, lng: 99.975914 },
+  { lat: 14.021006, lng: 99.975635 },
+  { lat: 14.021051, lng: 99.974696 },
+  { lat: 14.021043, lng: 99.973066 },
+  { lat: 14.022454, lng: 99.972195 },
+  { lat: 14.023805, lng: 99.975987 },
+  { lat: 14.022025, lng: 99.988539 },
 
-  while (true) {
-    const answer = (await readline.question(`${label}${defaultText}: `)).trim();
-    const value = answer === "" ? defaultValue : Number(answer);
+];
 
-    if (isValidCoordinate(value, min, max)) {
-      return value;
-    }
+if (locations.length !== 11) {
+  console.error("ต้องกำหนดพิกัดใน locations ให้ครบ 11 จุด");
+  process.exit(1);
+}
 
-    console.log(
-      `Invalid ${label}. Enter a number between ${min} and ${max}.`,
-    );
+for (const [index, location] of locations.entries()) {
+  if (
+    !isValidCoordinate(location.lat, -90, 90) ||
+    !isValidCoordinate(location.lng, -180, 180)
+  ) {
+    console.error(`พิกัดจุดที่ ${index + 1} ไม่ถูกต้อง`);
+    process.exit(1);
   }
-};
-
-const readline = createInterface({ input, output });
-let currentLat;
-let currentLng;
-
-currentLat = await askCoordinate(
-  readline,
-  "Latitude (-90 ถึง 90)",
-  defaultLat,
-  -90,
-  90,
-);
-currentLng = await askCoordinate(
-  readline,
-  "Longitude (-180 ถึง 180)",
-  defaultLng,
-  -180,
-  180,
-);
+}
 
 const topic = "cars/be71b19e-1460-485a-b61d-a30ec5cb352d";
 
@@ -68,73 +57,39 @@ const client = mqtt.connect(mqttUrl, {
 });
 
 let publishInterval;
+let locationIndex = 0;
+
+const publishNextLocation = () => {
+  const location = locations[locationIndex];
+  const payload = {
+    lat: Number(location.lat.toFixed(5)),
+    lng: Number(location.lng.toFixed(5)),
+    status: "active",
+  };
+
+  locationIndex = (locationIndex + 1) % locations.length;
+
+  // แปลง Object เป็น JSON string ก่อนส่ง
+  client.publish(topic, JSON.stringify(payload), { qos: 1 }, (err) => {
+    if (err) {
+      console.error("❌ Publish error:", err);
+    } else {
+      console.log(`📤 Published to ${topic}:`, payload);
+    }
+  });
+};
 
 client.on("connect", () => {
   console.log("✅ Connected to HiveMQ Cloud");
 
-  // ส่งพิกัดเดิมทุกๆ 5 วินาที
-  publishInterval = setInterval(() => {
-    const payload = {
-          // ตัดทศนิยมให้เหลือ 5 ตำแหน่ง (แม่นยำระดับ ~1 เมตร ซึ่งเพียงพอสำหรับ GPS ทั่วไป)
-      lat: parseFloat(currentLat.toFixed(5)),
-      lng: parseFloat(currentLng.toFixed(5)),
-      status: "active",
-    };
-
-    // แปลง Object เป็น JSON string ก่อนส่ง
-    client.publish(topic, JSON.stringify(payload), { qos: 1 }, (err) => {
-      if (err) {
-        console.error("❌ Publish error:", err);
-      } else {
-        console.log(`📤 Published to ${topic}:`, payload);
-      }
-    });
-  }, 5000);
+  // ส่งจุดแรกทันที แล้วเปลี่ยนเป็นจุดถัดไปทุกๆ 5 วินาที
+  if (!publishInterval) {
+    publishNextLocation();
+    publishInterval = setInterval(publishNextLocation, 5000);
+  }
 });
 
 // ดักจับ Error กรณีเชื่อมต่อไม่สำเร็จหรือมีปัญหาเครือข่าย
 client.on("error", (error) => {
   console.error("⚠️ MQTT Connection Error:", error);
-});
-
-const listenForCoordinateUpdates = async () => {
-  console.log(
-    "พิมพ์พิกัดใหม่ในรูปแบบ latitude,longitude เช่น 13.7563,100.5018 หรือพิมพ์ q เพื่อออก",
-  );
-
-  while (true) {
-    const answer = (await readline.question("New coordinates: ")).trim();
-
-    if (["q", "exit"].includes(answer.toLowerCase())) {
-      clearInterval(publishInterval);
-      readline.close();
-      client.end();
-      return;
-    }
-
-    const [latText, lngText] = answer.split(",").map((value) => value.trim());
-    const newLat = Number(latText);
-    const newLng = Number(lngText);
-
-    if (
-      !isValidCoordinate(newLat, -90, 90) ||
-      !isValidCoordinate(newLng, -180, 180)
-    ) {
-      console.log(
-        "รูปแบบไม่ถูกต้อง กรุณากรอกเป็น latitude,longitude เช่น 13.7563,100.5018",
-      );
-      continue;
-    }
-
-    currentLat = newLat;
-    currentLng = newLng;
-    console.log(`Updated coordinates: ${currentLat},${currentLng}`);
-  }
-};
-
-listenForCoordinateUpdates().catch((error) => {
-  console.error("Coordinate input error:", error);
-  clearInterval(publishInterval);
-  readline.close();
-  client.end();
 });
