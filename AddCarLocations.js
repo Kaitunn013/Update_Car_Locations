@@ -1,4 +1,5 @@
 import mqtt from "mqtt";
+import { readFileSync } from "node:fs";
 
 const mqttUrl =
   process.env.MQTT_URL ??
@@ -16,22 +17,51 @@ if (!username || !password) {
 const isValidCoordinate = (value, min, max) =>
   Number.isFinite(value) && value >= min && value <= max;
 
-// แก้พิกัดทั้ง 10 จุดได้ที่ array นี้ โดยเรียงลำดับจุดที่ต้องการให้รถเดินทาง
-const locations = [
-  { lat: 14.021746, lng: 99.988671 },
-  { lat: 14.022115, lng: 99.977652 },
-  { lat: 14.023593, lng: 99.976011},
-  { lat: 14.021670, lng: 99.975989 },
-  { lat: 14.021014, lng: 99.975764 },
-  { lat: 14.021024, lng: 99.975270 },
-  { lat: 14.021082, lng: 99.973419 },
-  { lat: 14.024101, lng: 99.972153 }, 
-  { lat: 14.023805, lng: 99.975987 },
-  { lat: 14.022025, lng: 99.988539 }
-];
+const routeFileUrl = new URL("./route.geojson", import.meta.url);
+let geoJson;
 
-if (locations.length !== 10) {
-  console.error("ต้องกำหนดพิกัดใน locations ให้ครบ 10 จุด");
+try {
+  geoJson = JSON.parse(readFileSync(routeFileUrl, "utf8"));
+} catch (error) {
+  console.error("ไม่สามารถอ่าน route.geojson ได้:", error.message);
+  process.exit(1);
+}
+
+const geometry =
+  geoJson.type === "FeatureCollection"
+    ? geoJson.features?.find((feature) => feature.geometry)?.geometry
+    : geoJson.geometry;
+
+if (!geometry || geometry.type !== "LineString") {
+  console.error("route.geojson ต้องมี geometry.type เป็น LineString");
+  process.exit(1);
+}
+
+const rawLocations = geometry.coordinates.map((coordinate, index) => {
+  const [lng, lat] = coordinate;
+
+  if (!isValidCoordinate(Number(lat), -90, 90) || !isValidCoordinate(Number(lng), -180, 180)) {
+    console.error(`พิกัดใน route.geojson จุดที่ ${index + 1} ไม่ถูกต้อง`);
+    process.exit(1);
+  }
+
+  return { lat: Number(lat), lng: Number(lng) };
+});
+
+const COORDINATE_EPSILON = 0.00001;
+const isSameCoordinate = (first, second) =>
+  Math.abs(first.lat - second.lat) < COORDINATE_EPSILON &&
+  Math.abs(first.lng - second.lng) < COORDINATE_EPSILON;
+
+// ถ้าไฟล์ปิดเส้นทางด้วยการใส่จุดเริ่มต้นซ้ำ ให้ตัดจุดซ้ำออกก่อนสร้างรอบกลับ
+const locations =
+  rawLocations.length > 1 &&
+  isSameCoordinate(rawLocations[0], rawLocations[rawLocations.length - 1])
+    ? rawLocations.slice(0, -1)
+    : rawLocations;
+
+if (locations.length < 2) {
+  console.error("route.geojson ต้องมีพิกัดอย่างน้อย 2 จุด");
   process.exit(1);
 }
 
@@ -45,6 +75,59 @@ for (const [index, location] of locations.entries()) {
   }
 }
 
+const UPDATE_INTERVAL_MS = 2000;
+const SIMULATED_SPEED_KMH = 50;
+const EARTH_RADIUS_METERS = 6_371_000;
+
+const toRadians = (degrees) => (degrees * Math.PI) / 180;
+
+const distanceInMeters = (from, to) => {
+  const latDelta = toRadians(to.lat - from.lat);
+  const lngDelta = toRadians(to.lng - from.lng);
+  const fromLat = toRadians(from.lat);
+  const toLat = toRadians(to.lat);
+  const haversine =
+    Math.sin(latDelta / 2) ** 2 +
+    Math.cos(fromLat) * Math.cos(toLat) * Math.sin(lngDelta / 2) ** 2;
+
+  return (
+    EARTH_RADIUS_METERS *
+    2 *
+    Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))
+  );
+};
+
+const buildRoutePoints = () => {
+  const routePoints = [];
+  const speedMetersPerSecond = (SIMULATED_SPEED_KMH * 1000) / 3600;
+  const metersPerUpdate =
+    speedMetersPerSecond * (UPDATE_INTERVAL_MS / 1000);
+
+  for (let index = 0; index < locations.length; index += 1) {
+    const start = locations[index];
+    const end = locations[(index + 1) % locations.length];
+    const distance = distanceInMeters(start, end);
+    const steps = Math.max(1, Math.ceil(distance / metersPerUpdate));
+
+    for (let step = 0; step < steps; step += 1) {
+      const progress = step / steps;
+      routePoints.push({
+        lat: start.lat + (end.lat - start.lat) * progress,
+        lng: start.lng + (end.lng - start.lng) * progress,
+      });
+    }
+  }
+
+  return routePoints;
+};
+
+if (SIMULATED_SPEED_KMH <= 0) {
+  console.error("SIMULATED_SPEED_KMH ต้องมากกว่า 0");
+  process.exit(1);
+}
+
+const routePoints = buildRoutePoints();
+
 const topic = "cars/be71b19e-1460-485a-b61d-a30ec5cb352d";
 
 // เชื่อมต่อกับ MQTT Broker
@@ -55,17 +138,17 @@ const client = mqtt.connect(mqttUrl, {
 });
 
 let publishInterval;
-let locationIndex = 0;
+let routePointIndex = 0;
 
-const publishNextLocation = () => {
-  const location = locations[locationIndex];
+const publishNextRoutePoint = () => {
+  const routePoint = routePoints[routePointIndex];
   const payload = {
-    lat: Number(location.lat.toFixed(5)),
-    lng: Number(location.lng.toFixed(5)),
+    lat: Number(routePoint.lat.toFixed(5)),
+    lng: Number(routePoint.lng.toFixed(5)),
     status: "active",
   };
 
-  locationIndex = (locationIndex + 1) % locations.length;
+  routePointIndex = (routePointIndex + 1) % routePoints.length;
 
   // แปลง Object เป็น JSON string ก่อนส่ง
   client.publish(topic, JSON.stringify(payload), { qos: 1 }, (err) => {
@@ -82,8 +165,11 @@ client.on("connect", () => {
 
   // ส่งจุดแรกทันที แล้วเปลี่ยนเป็นจุดถัดไปทุกๆ 5 วินาที
   if (!publishInterval) {
-    publishNextLocation();
-    publishInterval = setInterval(publishNextLocation, 5000);
+    publishNextRoutePoint();
+    publishInterval = setInterval(
+      publishNextRoutePoint,
+      UPDATE_INTERVAL_MS,
+    );
   }
 });
 
