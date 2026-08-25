@@ -75,8 +75,8 @@ for (const [index, location] of locations.entries()) {
   }
 }
 
-const UPDATE_INTERVAL_MS = 2000;
-const SIMULATED_SPEED_KMH = 50;
+const UPDATE_INTERVAL_MS = 4000;
+const SIMULATED_SPEED_KMH = 40;
 const EARTH_RADIUS_METERS = 6_371_000;
 
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
