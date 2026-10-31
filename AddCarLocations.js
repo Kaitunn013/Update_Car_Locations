@@ -181,7 +181,7 @@ const loadLocations = (routeFileName) => {
 };
 
 const UPDATE_INTERVAL_MS = 1000;
-const SIMULATED_SPEED_KMH = 70;
+const SIMULATED_SPEED_KMH = 40;
 const EARTH_RADIUS_METERS = 6_371_000;
 
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
@@ -254,7 +254,11 @@ const connectedCarIds = new Set();
 const publishNextRoutePoint = () => {
   for (const carId of selectedCarIds) {
     const client = mqttClientsByCarId.get(carId);
-    if (!client?.connected) {
+    if (!client) {
+      console.error(`❌ MQTT client not found for ${carId}`);
+      continue;
+    }
+    if (!client.connected) {
       continue;
     }
 
@@ -323,6 +327,18 @@ for (const carId of selectedCarIds) {
 
   client.on("close", () => {
     connectedCarIds.delete(carId);
+    console.error(`🔌 MQTT connection closed for ${carId}`);
+
+    if (publishInterval) {
+      clearInterval(publishInterval);
+      publishInterval = undefined;
+    }
+  });
+
+  client.on("disconnect", (packet) => {
+    console.error(
+      `⚠️ MQTT disconnected for ${carId}. Reason code: ${packet?.reasonCode ?? "unknown"}`,
+    );
   });
 
   // ดักจับ Error แยกตามรถ เพื่อรู้ว่า credential ของคันใดมีปัญหา
